@@ -17,6 +17,7 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
             await self._create_tables(db)
+            await self._migrate_columns(db)
             await db.commit()
 
     async def _create_tables(self, db: aiosqlite.Connection) -> None:
@@ -31,6 +32,8 @@ class Database:
                 proofs_channel_id INTEGER,
                 logs_channel_id INTEGER,
                 vouches_channel_id INTEGER,
+                sellauth_store_id TEXT,
+                sellauth_api_key TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -116,8 +119,39 @@ class Database:
                 metadata_json TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                tkz_order_id TEXT,
+                sellauth_order_id TEXT,
+                status TEXT NOT NULL,
+                amount REAL,
+                currency TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                tkz_order_id TEXT NOT NULL,
+                checked_by INTEGER NOT NULL,
+                result_status TEXT NOT NULL,
+                raw_json TEXT,
+                checked_at TEXT NOT NULL
+            );
             """
         )
+
+    async def _migrate_columns(self, db: aiosqlite.Connection) -> None:
+        rows = await db.execute_fetchall("PRAGMA table_info(config)")
+        cols = {r[1] for r in rows}
+        if "sellauth_store_id" not in cols:
+            await db.execute("ALTER TABLE config ADD COLUMN sellauth_store_id TEXT")
+        if "sellauth_api_key" not in cols:
+            await db.execute("ALTER TABLE config ADD COLUMN sellauth_api_key TEXT")
 
     async def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         async with self._lock:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -9,6 +10,20 @@ from discord.ext import commands
 from core.constants import ORDER_STATUSES, PAYMENT_METHODS
 from core.helpers import tekaz_embed, utcnow_iso
 from core.permissions import is_staff
+from integrations.sellauth import SellAuthClient
+
+
+def _map_sellauth_to_order_status(status: str) -> str:
+    s = status.lower()
+    if s in {"paid", "completed", "complete", "success"}:
+        return "Paid"
+    if s in {"refunded"}:
+        return "Refunded"
+    if s in {"chargeback"}:
+        return "Disputed"
+    if s in {"cancelled", "failed"}:
+        return "Cancelled"
+    return "Pending"
 
 
 class OrderActionView(discord.ui.View):
@@ -17,24 +32,29 @@ class OrderActionView(discord.ui.View):
         self.cog = cog
         self.order_id = order_id
 
-    async def _set(self, interaction: discord.Interaction, status: str) -> None:
-        await self.cog.set_order_status(interaction, self.order_id, status)
-
     @discord.ui.button(label="✅ Mark Paid", style=discord.ButtonStyle.success)
     async def mark_paid(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._set(interaction, "Paid")
+        await self.cog.set_order_status(interaction, self.order_id, "Paid")
 
     @discord.ui.button(label="📦 Mark Delivered", style=discord.ButtonStyle.primary)
     async def mark_delivered(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._set(interaction, "Delivered")
+        row = await self.cog.bot.db.fetchone("SELECT * FROM orders WHERE order_id = ?", (self.order_id,))
+        if not row:
+            await interaction.response.send_message("Commande introuvable", ephemeral=True)
+            return
+        ok = await self.cog.can_deliver_order(row)
+        if not ok:
+            await interaction.response.send_message("Livraison bloquée: paiement non confirmé (statut Paid ou vérification récente).", ephemeral=True)
+            return
+        await self.cog.set_order_status(interaction, self.order_id, "Delivered")
 
     @discord.ui.button(label="⚠️ Dispute", style=discord.ButtonStyle.secondary)
     async def dispute(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._set(interaction, "Disputed")
+        await self.cog.set_order_status(interaction, self.order_id, "Disputed")
 
     @discord.ui.button(label="💸 Refund", style=discord.ButtonStyle.danger)
     async def refund(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._set(interaction, "Refunded")
+        await self.cog.set_order_status(interaction, self.order_id, "Refunded")
 
 
 class OrdersCog(commands.Cog, name="orders"):
@@ -42,8 +62,9 @@ class OrdersCog(commands.Cog, name="orders"):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.sellauth = SellAuthClient()
 
-    def _embed(self, row: dict | discord.utils.MISSING) -> discord.Embed:
+    def _embed(self, row) -> discord.Embed:
         embed = tekaz_embed(f"🛒 Order {row['order_id']}")
         embed.add_field(name="User", value=f"<@{row['user_id']}>")
         embed.add_field(name="Product", value=row["product"])
@@ -53,18 +74,25 @@ class OrdersCog(commands.Cog, name="orders"):
         embed.add_field(name="Note", value=row["note"] or "-", inline=False)
         return embed
 
+    async def can_deliver_order(self, order_row) -> bool:
+        if order_row["status"] == "Paid":
+            return True
+        check = await self.bot.db.fetchone(
+            "SELECT * FROM payment_checks WHERE guild_id = ? AND tkz_order_id = ? ORDER BY checked_at DESC LIMIT 1",
+            (order_row["guild_id"], order_row["order_id"]),
+        )
+        if not check:
+            return False
+        try:
+            checked_at = datetime.fromisoformat(check["checked_at"])
+        except ValueError:
+            return False
+        fresh = datetime.now(timezone.utc) - checked_at <= timedelta(minutes=10)
+        return fresh and check["result_status"].lower() in {"paid", "completed", "complete", "success"}
+
     @order.command(name="create", description="Créer une commande")
-    @app_commands.describe(note="Optionnel")
     @app_commands.checks.cooldown(3, 30)
-    async def create(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member,
-        product: str,
-        price: app_commands.Range[float, 0, None],
-        payment: str,
-        note: str | None = None,
-    ) -> None:
+    async def create(self, interaction: discord.Interaction, user: discord.Member, product: str, price: app_commands.Range[float, 0, None], payment: str, note: str | None = None) -> None:
         assert interaction.guild
         if payment not in PAYMENT_METHODS:
             await interaction.response.send_message("Méthode de paiement invalide", ephemeral=True)
@@ -106,13 +134,12 @@ class OrdersCog(commands.Cog, name="orders"):
         if not row:
             await interaction.response.send_message("Commande introuvable", ephemeral=True)
             return
+        if status == "Delivered" and not await self.can_deliver_order(row):
+            await interaction.response.send_message("Livraison bloquée: paiement non confirmé.", ephemeral=True)
+            return
         await self.bot.db.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (status, utcnow_iso(), order_id))
         await self.bot.audit(row["guild_id"], interaction.user.id, "ORDER_STATUS", order_id, {"status": status})
-        embed = tekaz_embed("✅ Order updated", f"{order_id} → **{status}**")
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=tekaz_embed("✅ Order updated", f"{order_id} → **{status}**"), ephemeral=True)
 
     @order.command(name="setstatus", description="Modifier statut")
     @is_staff()
@@ -142,6 +169,54 @@ class OrdersCog(commands.Cog, name="orders"):
             return
         lines = [f"`{r['order_id']}` • <@{r['user_id']}> • **{r['status']}** • {r['product']}" for r in rows]
         await interaction.response.send_message(embed=tekaz_embed("Orders", "\n".join(lines)), ephemeral=True)
+
+    @order.command(name="verify", description="Vérifier une commande via SellAuth")
+    @is_staff()
+    @app_commands.checks.cooldown(5, 60)
+    async def verify(self, interaction: discord.Interaction, order_id: str, sellauth_order_id: str | None = None) -> None:
+        assert interaction.guild
+        order = await self.bot.db.fetchone("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+        if not order:
+            await interaction.response.send_message("Commande introuvable", ephemeral=True)
+            return
+
+        pay = None
+        if not sellauth_order_id:
+            pay = await self.bot.db.fetchone(
+                "SELECT * FROM payments WHERE guild_id = ? AND tkz_order_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (interaction.guild.id, order_id),
+            )
+            sellauth_order_id = pay["sellauth_order_id"] if pay and pay["sellauth_order_id"] else None
+        if not sellauth_order_id:
+            await interaction.response.send_message("Fournis `sellauth_order_id` ou reçois d'abord un webhook.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            paid, status, raw = await self.sellauth.verify_paid(sellauth_order_id)
+        except Exception as exc:
+            await interaction.followup.send(f"Erreur SellAuth: {exc}", ephemeral=True)
+            return
+
+        mapped_status = _map_sellauth_to_order_status(status)
+        await self.bot.db.execute(
+            "INSERT INTO payments(guild_id, tkz_order_id, sellauth_order_id, status, amount, currency, raw_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (interaction.guild.id, order_id, sellauth_order_id, status, float(raw.get("amount") or 0), str(raw.get("currency") or ""), str(raw), utcnow_iso(), utcnow_iso()),
+        )
+        await self.bot.db.execute(
+            "INSERT INTO payment_checks(guild_id, tkz_order_id, checked_by, result_status, raw_json, checked_at) VALUES(?,?,?,?,?,?)",
+            (interaction.guild.id, order_id, interaction.user.id, status, str(raw), utcnow_iso()),
+        )
+        await self.bot.db.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (mapped_status, utcnow_iso(), order_id))
+        await self.bot.audit(interaction.guild.id, interaction.user.id, "ORDER_VERIFY", order_id, {"sellauth": sellauth_order_id, "status": status})
+
+        if paid:
+            msg = f"✅ Paiement confirmé ({status}). Commande `{order_id}` marquée **Paid**."
+        elif status.lower() in {"refunded", "chargeback"}:
+            msg = f"⚠️ Paiement à risque ({status}). Commande `{order_id}` -> **{mapped_status}** et livraison bloquée."
+        else:
+            msg = f"❌ Paiement non validé ({status}). Commande conservée en **{mapped_status}**."
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

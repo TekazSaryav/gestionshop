@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from core.database import Database
 from core.helpers import safe_json, tekaz_embed, utcnow_iso
 from core.logger import setup_logging
+from core.webhooks import start_webhook_server
 
 COGS = [
     "cogs.admin",
@@ -36,6 +37,7 @@ class TekazBot(commands.Bot):
         self.db = Database(os.getenv("DATABASE_PATH", "tekaz_shop.db"))
         self.log = logging.getLogger("tekaz")
         self.order_counter_start = int(os.getenv("ORDER_COUNTER_START", "1"))
+        self.webhook_runner = None
 
     async def setup_hook(self) -> None:
         await self.db.connect()
@@ -48,6 +50,13 @@ class TekazBot(commands.Bot):
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
+        self.webhook_runner = await start_webhook_server(self)
+
+
+    async def close(self) -> None:
+        if self.webhook_runner:
+            await self.webhook_runner.cleanup()
+        await super().close()
 
     async def on_ready(self) -> None:
         self.log.info("Bot connecté en tant que %s", self.user)

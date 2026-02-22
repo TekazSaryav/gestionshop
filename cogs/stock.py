@@ -83,6 +83,10 @@ class StockCog(commands.Cog, name="stock"):
         if not order:
             await interaction.response.send_message("Commande introuvable", ephemeral=True)
             return
+        orders_cog = self.bot.get_cog("orders")
+        if orders_cog and not await orders_cog.can_deliver_order(order):
+            await interaction.response.send_message("Livraison bloquée: paiement non confirmé (Paid ou check SellAuth < 10 min).", ephemeral=True)
+            return
         product = await self.bot.db.fetchone("SELECT * FROM products WHERE name = ? AND guild_id = ?", (order["product"], order["guild_id"]))
         if not product or product["stock_mode"] != "KeyStock":
             await interaction.response.send_message("Produit non KeyStock", ephemeral=True)

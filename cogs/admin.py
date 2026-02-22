@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -10,8 +11,15 @@ from discord.ext import commands
 from core.helpers import tekaz_embed, utcnow_iso
 from core.permissions import is_admin, is_staff
 
+CONFIG_KEYS = {
+    "sellauth_api_key": "TEXT",
+    "sellauth_store_id": "TEXT",
+}
+
 
 class AdminCog(commands.Cog, name="admin"):
+    config = app_commands.Group(name="config", description="Configuration Tekaz")
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
@@ -40,23 +48,35 @@ class AdminCog(commands.Cog, name="admin"):
             proofs_channel_id=excluded.proofs_channel_id, logs_channel_id=excluded.logs_channel_id,
             vouches_channel_id=excluded.vouches_channel_id, updated_at=excluded.updated_at
             """,
-            (
-                interaction.guild.id,
-                staff_role.id,
-                admin_role.id,
-                tickets_category.id,
-                orders_channel.id,
-                proofs_channel.id,
-                logs_channel.id,
-                vouches_channel.id,
-                now,
-                now,
-            ),
+            (interaction.guild.id, staff_role.id, admin_role.id, tickets_category.id, orders_channel.id, proofs_channel.id, logs_channel.id, vouches_channel.id, now, now),
         )
         await self.bot.audit(interaction.guild.id, interaction.user.id, "CONFIG_SETUP", str(interaction.guild.id), {"staff_role": staff_role.id})
         await interaction.response.send_message(embed=tekaz_embed("✅ Setup done", "Configuration enregistrée."), ephemeral=True)
 
-    @app_commands.command(name="config_show", description="Afficher la configuration")
+    @config.command(name="set", description="Définir une valeur de config")
+    @is_admin()
+    async def config_set(self, interaction: discord.Interaction, key: str, value: str) -> None:
+        assert interaction.guild
+        if key not in CONFIG_KEYS:
+            await interaction.response.send_message(f"Clé invalide. Clés: {', '.join(CONFIG_KEYS)}", ephemeral=True)
+            return
+        now = utcnow_iso()
+        await self.bot.db.execute(
+            f"INSERT INTO config(guild_id, {key}, created_at, updated_at) VALUES(?,?,?,?) ON CONFLICT(guild_id) DO UPDATE SET {key}=excluded.{key}, updated_at=excluded.updated_at",
+            (interaction.guild.id, value, now, now),
+        )
+        if key == "sellauth_api_key":
+            os.environ["SELLAUTH_API_KEY"] = value
+        if key == "sellauth_store_id":
+            os.environ["SELLAUTH_STORE_ID"] = value
+        await self.bot.audit(interaction.guild.id, interaction.user.id, "CONFIG_SET", key)
+        await interaction.response.send_message(embed=tekaz_embed("✅ Config set", f"`{key}` mis à jour."), ephemeral=True)
+
+    @config_set.autocomplete("key")
+    async def config_key_autocomplete(self, _: discord.Interaction, current: str):
+        return [app_commands.Choice(name=k, value=k) for k in CONFIG_KEYS if current.lower() in k.lower()]
+
+    @config.command(name="show", description="Afficher la configuration")
     @is_staff()
     async def config_show(self, interaction: discord.Interaction) -> None:
         assert interaction.guild
@@ -65,8 +85,12 @@ class AdminCog(commands.Cog, name="admin"):
             await interaction.response.send_message(embed=tekaz_embed("❌ Missing config", "Lancez /setup."), ephemeral=True)
             return
         embed = tekaz_embed("Tekaz Config")
-        for key in ["staff_role_id", "admin_role_id", "tickets_category_id", "orders_channel_id", "proofs_channel_id", "logs_channel_id", "vouches_channel_id"]:
-            embed.add_field(name=key, value=str(row[key]), inline=True)
+        keys = ["staff_role_id", "admin_role_id", "tickets_category_id", "orders_channel_id", "proofs_channel_id", "logs_channel_id", "vouches_channel_id", "sellauth_store_id", "sellauth_api_key"]
+        for key in keys:
+            value = row[key]
+            if key == "sellauth_api_key" and value:
+                value = "****"
+            embed.add_field(name=key, value=str(value or "-"), inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="backup_db", description="Créer une copie de la base de données")
@@ -81,12 +105,10 @@ class AdminCog(commands.Cog, name="admin"):
     @app_commands.command(name="health", description="Santé du bot")
     async def health(self, interaction: discord.Interaction) -> None:
         db_size = Path(self.bot.db.path).stat().st_size if Path(self.bot.db.path).exists() else 0
-        uptime = utcnow_iso()
         embed = tekaz_embed("Tekaz Health")
         embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms")
         embed.add_field(name="Guilds", value=str(len(self.bot.guilds)))
         embed.add_field(name="DB size", value=f"{db_size} bytes")
-        embed.add_field(name="Now", value=uptime, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

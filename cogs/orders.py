@@ -188,7 +188,7 @@ class OrdersCog(commands.Cog, name="orders"):
             )
             sellauth_order_id = pay["sellauth_order_id"] if pay and pay["sellauth_order_id"] else None
         if not sellauth_order_id:
-            await interaction.response.send_message("Fournis `sellauth_order_id` ou reçois d'abord un webhook.", ephemeral=True)
+            await interaction.response.send_message("Fournis `sellauth_order_id` (le webhook SellAuth n'est pas requis).", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)

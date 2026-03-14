@@ -15,7 +15,8 @@ log = logging.getLogger("tekaz.webhook")
 async def start_webhook_server(bot) -> web.AppRunner | None:
     host = os.getenv("WEBHOOK_HOST", "0.0.0.0")
     port = int(os.getenv("WEBHOOK_PORT", "8080"))
-    if os.getenv("ENABLE_WEBHOOK_SERVER", "true").lower() not in {"1", "true", "yes"}:
+    if os.getenv("ENABLE_WEBHOOK_SERVER", "false").lower() not in {"1", "true", "yes"}:
+        log.info("Webhook server disabled (ENABLE_WEBHOOK_SERVER=false).")
         return None
 
     app = web.Application()
@@ -73,7 +74,9 @@ async def start_webhook_server(bot) -> web.AppRunner | None:
         return web.json_response({"ok": True})
 
     app.router.add_get("/health", health)
+    # Kept for backward compatibility + optional custom relay endpoints.
     app.router.add_post("/webhooks/sellauth", sellauth_webhook)
+    app.router.add_post("/webhooks/payment", sellauth_webhook)
 
     runner = web.AppRunner(app)
     await runner.setup()

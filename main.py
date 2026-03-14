@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import suppress
 from datetime import datetime, timezone
-from pathlib import Path
+
 
 import discord
 from discord.ext import commands
@@ -24,7 +25,21 @@ COGS = [
     "cogs.vouches",
     "cogs.stats",
     "cogs.utils",
+    "cogs.catalog",
 ]
+
+
+def _parse_restart_interval(raw: str | None) -> int:
+    if not raw:
+        return 0
+    value = raw.strip().lower()
+    if value.isdigit():
+        return int(value)
+    units = {"s": 1, "m": 60, "h": 3600}
+    suffix = value[-1]
+    if suffix in units and value[:-1].isdigit():
+        return int(value[:-1]) * units[suffix]
+    raise ValueError("AUTO_RESTART_INTERVAL invalide. Ex: 3600, 30m, 6h")
 
 
 class TekazBot(commands.Bot):
@@ -38,6 +53,9 @@ class TekazBot(commands.Bot):
         self.log = logging.getLogger("tekaz")
         self.order_counter_start = int(os.getenv("ORDER_COUNTER_START", "1"))
         self.webhook_runner = None
+        self.restart_interval = _parse_restart_interval(os.getenv("AUTO_RESTART_INTERVAL"))
+        self.restart_requested = False
+        self._restart_task: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
         await self.db.connect()
@@ -51,9 +69,21 @@ class TekazBot(commands.Bot):
         else:
             await self.tree.sync()
         self.webhook_runner = await start_webhook_server(self)
+        if self.restart_interval > 0:
+            self._restart_task = asyncio.create_task(self._auto_restart_loop())
+
+    async def _auto_restart_loop(self) -> None:
+        await asyncio.sleep(self.restart_interval)
+        self.restart_requested = True
+        self.log.warning("Restart automatique déclenché après %s secondes", self.restart_interval)
+        await self.close()
 
 
     async def close(self) -> None:
+        if self._restart_task and self._restart_task is not asyncio.current_task():
+            self._restart_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._restart_task
         if self.webhook_runner:
             await self.webhook_runner.cleanup()
         await super().close()
@@ -101,9 +131,14 @@ async def main() -> None:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_TOKEN manquant dans .env")
-    bot = TekazBot()
-    async with bot:
-        await bot.start(token)
+    while True:
+        bot = TekazBot()
+        async with bot:
+            await bot.start(token)
+        if not bot.restart_requested:
+            break
+        logging.getLogger("tekaz").info("Redémarrage du bot...")
+        await asyncio.sleep(2)
 
 
 if __name__ == "__main__":

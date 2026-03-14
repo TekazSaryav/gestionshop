@@ -142,6 +142,36 @@ class Database:
                 raw_json TEXT,
                 checked_at TEXT NOT NULL
             );
+
+
+            CREATE TABLE IF NOT EXISTS menu_panels (
+                guild_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(guild_id, category)
+            );
+
+            CREATE TABLE IF NOT EXISTS menu_selections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                item TEXT NOT NULL,
+                channel_id INTEGER,
+                message_id INTEGER,
+                selected_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS menu_state (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                last_item TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(guild_id, user_id, category)
+            );
             """
         )
 
@@ -152,6 +182,13 @@ class Database:
             await db.execute("ALTER TABLE config ADD COLUMN sellauth_store_id TEXT")
         if "sellauth_api_key" not in cols:
             await db.execute("ALTER TABLE config ADD COLUMN sellauth_api_key TEXT")
+
+        rows = await db.execute_fetchall("PRAGMA table_info(menu_selections)")
+        selection_cols = {r[1] for r in rows}
+        if selection_cols and "channel_id" not in selection_cols:
+            await db.execute("ALTER TABLE menu_selections ADD COLUMN channel_id INTEGER")
+        if selection_cols and "message_id" not in selection_cols:
+            await db.execute("ALTER TABLE menu_selections ADD COLUMN message_id INTEGER")
 
     async def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         async with self._lock:

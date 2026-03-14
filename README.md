@@ -48,3 +48,17 @@ Bot Discord `discord.py 2.x` pour gérer commandes, tickets, preuves, stock, vou
 - Accepté si:
   - commande en `Paid`, ou
   - check SellAuth positif de moins de 10 minutes.
+
+
+## Menus déroulants produits
+
+- Nouveau module `/catalog` avec 6 menus: Accounts, Cheat, Boosts, VPN, Tools, Formations.
+- Commande staff: `/catalog setup` publie automatiquement chaque menu dans les salons `#accounts`, `#cheat`, `#boosts`, `#vpn`, `#tools`, `#formation`.
+- Les choix utilisateurs sont persistés en base (`menu_state`, `menu_selections`) et restent disponibles après redémarrage.
+- Commande utilisateur: `/catalog my` pour revoir les derniers choix sauvegardés.
+
+## Redémarrage automatique
+
+- Variable `.env`: `AUTO_RESTART_INTERVAL`
+- Formats acceptés: secondes (`3600`) ou suffixes (`30m`, `6h`).
+- À la fin de l'intervalle, le bot se ferme puis redémarre automatiquement (boucle `main`) sans perdre les données (SQLite).
